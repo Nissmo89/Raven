@@ -1722,7 +1722,7 @@ static void rvn_ed_paint_selection(RPainter* painter, const rvn_ed_metrics_t* m,
 		float x1 = rvn_ed_advance(m, l->text, from, to, x0);
 		/* a selected line break shows as a little more than the text */
 		if (line < sel_max.line && end == l->length) x1 += m->space;
-		if (x1 > x0) rvn_paint_box(painter, rvn_rect(x + x0, y, x1 - x0, m->line_height), 3.0f, color, 0.0f, 0);
+		if (x1 > x0) rvn_paint_box(painter, rvn_rect(x + x0, y, x1 - x0, m->line_height), 0.0f, color, 0.0f, 0);
 	}
 }
 
