@@ -87,6 +87,9 @@ static void test_content(void) {
 	CHECK_CURSOR(0, 3);
 	Rtext_editor_select_all(g_editor);
 	CHECK_STR(Rtext_editor_get_selected_text(g_editor), "alpha\nbeta\ngamma");
+	/* Regression: a selection across rows paints as one connected, corner-aware shape. */
+	Rtext_editor_select(g_editor, 0, 2, 2, 3);
+	Rdraw_frame();
 
 	/* typing replaces the selection, and tells the application */
 	Rtext_editor_select(g_editor, 0, 3, 1, 2);
