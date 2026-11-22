@@ -1709,42 +1709,215 @@ static rvn_color_t rvn_ed_marker_color(RMarkerKind kind, const rvn_widget_t* wid
 	}
 }
 
-/* Horizontal extent of a selection on one visual row, in text-area coordinates. */
-static int rvn_ed_selection_span(const rvn_text_editor_t* ed, const rvn_ed_metrics_t* m, uint32_t row,
-	rvn_ed_pos_t sel_min, rvn_ed_pos_t sel_max, float* x0, float* x1) {
-	const rvn_ed_line_t* l;
-	int line, line_row, begin, end, from, to;
-	if (row >= ed->total_rows) return R_FALSE;
-	rvn_ed_locate_row(ed, row, &line, &line_row);
-	if (line < sel_min.line || line > sel_max.line) return R_FALSE;
-	rvn_ed_row_range(ed, line, line_row, &begin, &end);
-	l = &ed->lines[line];
-	from = line == sel_min.line ? rvn_maxi(sel_min.column, begin) : begin;
-	to = line == sel_max.line ? rvn_mini(sel_max.column, end) : end;
-	if (from > to || (line == sel_max.line && sel_max.column < begin) || (line == sel_min.line && sel_min.column > end)) return R_FALSE;
-	*x0 = rvn_ed_advance(m, l->text, begin, from, 0.0f);
-	*x1 = rvn_ed_advance(m, l->text, from, to, *x0);
-	/* Include the selected line break so adjacent rows form one joined shape. */
-	if (line < sel_max.line && end == l->length) *x1 += m->space;
-	return *x1 > *x0;
+/* Continuous selection geometry representation and rendering (inspired by Zed Editor). */
+typedef struct {
+	float start_x;
+	float end_x;
+	float y;
+	uint32_t display_row;
+} rvn_selection_row_t;
+
+#define RVN_ED_LOCAL_ROWS 64
+
+/* Anti-aliased concave fillet bridging an inward corner (C) to adjacent edges (H and V).
+ * sx: horizontal direction (+1 or -1) from C towards H.
+ * sy: vertical direction (+1 or -1) from C towards V.
+ * Approximates a smooth circular/Bézier quarter-arc with sub-pixel deviation using two triangles. */
+static void rvn_ed_paint_inner_fillet(RPainter* painter, float cx, float cy, float sx, float sy, float radius, rvn_color_t color) {
+	float hx, hy, vx, vy, mx, my;
+	if (radius < 0.5f) return;
+	hx = cx + sx * radius;
+	hy = cy;
+	vx = cx;
+	vy = cy + sy * radius;
+	/* Midpoint of concave circular arc: 1 - 1/sqrt(2) approx 0.292893f */
+	mx = cx + sx * radius * 0.292893f;
+	my = cy + sy * radius * 0.292893f;
+	rvn_paint_triangle(painter, cx, cy, hx, hy, mx, my, color);
+	rvn_paint_triangle(painter, cx, cy, mx, my, vx, vy, color);
 }
 
-/* C-AIR customization: join row spans and round only exposed selection corners. */
-static void rvn_ed_paint_selection(const rvn_text_editor_t* ed, RPainter* painter, const rvn_ed_metrics_t* m,
-	uint32_t row, rvn_ed_pos_t sel_min, rvn_ed_pos_t sel_max, float x, float y, rvn_color_t color) {
-	float x0, x1, previous_x0 = 0.0f, previous_x1 = 0.0f, next_x0 = 0.0f, next_x1 = 0.0f;
-	float radius, radii[4];
-	int has_previous, has_next;
-	if (!rvn_ed_selection_span(ed, m, row, sel_min, sel_max, &x0, &x1)) return;
-	has_previous = row > 0 && rvn_ed_selection_span(ed, m, row - 1, sel_min, sel_max, &previous_x0, &previous_x1);
-	has_next = row + 1 < ed->total_rows && rvn_ed_selection_span(ed, m, row + 1, sel_min, sel_max, &next_x0, &next_x1);
-	radius = rvn_minf(3.0f, rvn_minf(m->line_height * 0.18f, (x1 - x0) * 0.5f));
-	/* top-left, top-right, bottom-right, bottom-left */
-	radii[0] = !has_previous || x0 < previous_x0 ? radius : 0.0f;
-	radii[1] = !has_previous || x1 > previous_x1 ? radius : 0.0f;
-	radii[2] = !has_next || x1 > next_x1 ? radius : 0.0f;
-	radii[3] = !has_next || x0 < next_x0 ? radius : 0.0f;
-	rvn_paint_box4(painter, rvn_rect(x + x0, y, x1 - x0, m->line_height), radii, color, 0.0f, 0);
+/* Collect visible horizontal selection row segments in screen-local painter coordinates.
+ * Preserves character advance calculation and line break extension. */
+static uint32_t rvn_ed_collect_selection_rows(const rvn_text_editor_t* ed, const rvn_ed_metrics_t* m,
+	uint32_t first_row, uint32_t last_row, rvn_ed_pos_t sel_min, rvn_ed_pos_t sel_max,
+	float text_x, float scroll_y, rvn_selection_row_t* out_rows, uint32_t max_rows) {
+	uint32_t count = 0, row;
+	float corner_radius = m->line_height * 0.15f;
+	float overshoot = rvn_maxf(m->space, corner_radius * 2.0f);
+
+	for (row = first_row; row < last_row; row++) {
+		const rvn_ed_line_t* l;
+		int line, line_row, begin, end, from, to;
+		float x0, x1;
+
+		if (row >= ed->total_rows) continue;
+		rvn_ed_locate_row(ed, row, &line, &line_row);
+		if (line < sel_min.line || line > sel_max.line) continue;
+		rvn_ed_row_range(ed, line, line_row, &begin, &end);
+		l = &ed->lines[line];
+
+		from = line == sel_min.line ? rvn_maxi(sel_min.column, begin) : begin;
+		to = line == sel_max.line ? rvn_mini(sel_max.column, end) : end;
+
+		if (from > to || (line == sel_max.line && sel_max.column < begin) ||
+			(line == sel_min.line && sel_min.column > end)) {
+			continue;
+		}
+
+		x0 = rvn_ed_advance(m, l->text, begin, from, 0.0f);
+		x1 = rvn_ed_advance(m, l->text, from, to, x0);
+
+		/* Non-terminal line ends receive horizontal overshoot so turning corners clear glyphs */
+		if (line < sel_max.line && end == l->length) {
+			x1 += overshoot;
+		}
+
+		if (x1 > x0) {
+			if (out_rows && count < max_rows) {
+				out_rows[count].start_x = text_x + x0;
+				out_rows[count].end_x = text_x + x1;
+				out_rows[count].y = m->area.y + (float)row * m->line_height - scroll_y;
+				out_rows[count].display_row = row;
+			}
+			count++;
+		}
+	}
+	return count;
+}
+
+/* Paint continuous selection geometry for a collected group of adjacent rows.
+ * Outer corners are smoothly rounded; inward transitions receive anti-aliased fillets.
+ * Adjacent rows and fillets are strictly non-overlapping, maintaining uniform opacity. */
+static void rvn_ed_paint_selection_group(RPainter* painter, const rvn_ed_metrics_t* m,
+	const rvn_selection_row_t* rows, uint32_t count, rvn_color_t color) {
+	float base_radius = m->line_height * 0.15f;
+	uint32_t i;
+
+	if (count == 0) return;
+
+	/* 1. Paint row rectangular bands with rounded outer corners */
+	for (i = 0; i < count; i++) {
+		const rvn_selection_row_t* curr = &rows[i];
+		const rvn_selection_row_t* prev = i > 0 ? &rows[i - 1] : NULL;
+		const rvn_selection_row_t* next = (i + 1 < count) ? &rows[i + 1] : NULL;
+		float seg_w = curr->end_x - curr->start_x;
+		float r = rvn_minf(base_radius, seg_w * 0.5f);
+		float radii[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+		if (r < 0.0f) r = 0.0f;
+
+		/* Top-left corner */
+		if (!prev) {
+			radii[0] = r;
+		} else if (curr->start_x < prev->start_x) {
+			float dx = prev->start_x - curr->start_x;
+			radii[0] = rvn_minf(r, dx * 0.5f);
+		}
+
+		/* Top-right corner */
+		if (!prev) {
+			radii[1] = r;
+		} else if (curr->end_x > prev->end_x) {
+			float dx = curr->end_x - prev->end_x;
+			radii[1] = rvn_minf(r, dx * 0.5f);
+		}
+
+		/* Bottom-right corner */
+		if (!next) {
+			radii[2] = r;
+		} else if (curr->end_x > next->end_x) {
+			float dx = curr->end_x - next->end_x;
+			radii[2] = rvn_minf(r, dx * 0.5f);
+		}
+
+		/* Bottom-left corner */
+		if (!next) {
+			radii[3] = r;
+		} else if (curr->start_x < next->start_x) {
+			float dx = next->start_x - curr->start_x;
+			radii[3] = rvn_minf(r, dx * 0.5f);
+		}
+
+		rvn_paint_box4(painter, rvn_rect(curr->start_x, curr->y, seg_w, m->line_height),
+			radii, color, 0.0f, 0);
+	}
+
+	/* 2. Paint concave inner fillets at row boundaries */
+	for (i = 0; i + 1 < count; i++) {
+		const rvn_selection_row_t* curr = &rows[i];
+		const rvn_selection_row_t* next = &rows[i + 1];
+		float seam_y = curr->y + m->line_height;
+
+		/* Right edge transition */
+		if (curr->end_x > next->end_x) {
+			/* Step inward: inner corner on next row (x = next->end_x, y = seam_y), quadrant (+x, +y) */
+			float dx = curr->end_x - next->end_x;
+			float fr = rvn_minf(base_radius, rvn_minf(dx * 0.5f, m->line_height * 0.5f));
+			rvn_ed_paint_inner_fillet(painter, next->end_x, seam_y, 1.0f, 1.0f, fr, color);
+		} else if (curr->end_x < next->end_x) {
+			/* Step outward: inner corner on curr row (x = curr->end_x, y = seam_y), quadrant (+x, -y) */
+			float dx = next->end_x - curr->end_x;
+			float fr = rvn_minf(base_radius, rvn_minf(dx * 0.5f, m->line_height * 0.5f));
+			rvn_ed_paint_inner_fillet(painter, curr->end_x, seam_y, 1.0f, -1.0f, fr, color);
+		}
+
+		/* Left edge transition */
+		if (curr->start_x > next->start_x) {
+			/* Step outward to the left: inner corner on curr row (x = curr->start_x, y = seam_y), quadrant (-x, -y) */
+			float dx = curr->start_x - next->start_x;
+			float fr = rvn_minf(base_radius, rvn_minf(dx * 0.5f, m->line_height * 0.5f));
+			rvn_ed_paint_inner_fillet(painter, curr->start_x, seam_y, -1.0f, -1.0f, fr, color);
+		} else if (curr->start_x < next->start_x) {
+			/* Step inward to the right: inner corner on next row (x = next->start_x, y = seam_y), quadrant (-x, +y) */
+			float dx = next->start_x - curr->start_x;
+			float fr = rvn_minf(base_radius, rvn_minf(dx * 0.5f, m->line_height * 0.5f));
+			rvn_ed_paint_inner_fillet(painter, next->start_x, seam_y, -1.0f, 1.0f, fr, color);
+		}
+	}
+}
+
+/* Paint a selection range across visible display rows as connected continuous geometry. */
+static void rvn_ed_paint_selection_range(const rvn_text_editor_t* ed, RPainter* painter,
+	const rvn_ed_metrics_t* m, uint32_t first_row, uint32_t last_row,
+	rvn_ed_pos_t sel_min, rvn_ed_pos_t sel_max, float text_x, float scroll_y, rvn_color_t color) {
+	rvn_selection_row_t local_rows[RVN_ED_LOCAL_ROWS];
+	rvn_selection_row_t* rows = local_rows;
+	uint32_t needed, group_start, i;
+
+	needed = rvn_ed_collect_selection_rows(ed, m, first_row, last_row, sel_min, sel_max, text_x, scroll_y, NULL, 0);
+	if (needed == 0) return;
+
+	if (needed > RVN_ED_LOCAL_ROWS) {
+		rows = (rvn_selection_row_t*)rvn_alloc(sizeof(rvn_selection_row_t) * (size_t)needed);
+		if (!rows) return;
+	}
+
+	rvn_ed_collect_selection_rows(ed, m, first_row, last_row, sel_min, sel_max, text_x, scroll_y, rows, needed);
+
+	/* Partition into connected components (handling line gaps and Zed's horizontal non-overlap case) */
+	group_start = 0;
+	for (i = 0; i < needed; i++) {
+		int breaks = R_FALSE;
+		if (i + 1 < needed) {
+			if (rows[i + 1].display_row != rows[i].display_row + 1) {
+				breaks = R_TRUE;
+			} else if (rows[i].start_x >= rows[i + 1].end_x || rows[i + 1].start_x >= rows[i].end_x) {
+				breaks = R_TRUE;
+			}
+		} else {
+			breaks = R_TRUE;
+		}
+
+		if (breaks) {
+			rvn_ed_paint_selection_group(painter, m, &rows[group_start], i - group_start + 1, color);
+			group_start = i + 1;
+		}
+	}
+
+	if (rows != local_rows) {
+		rvn_free(rows);
+	}
 }
 
 /* The "..." shown after the first line of a folded region, in the coordinates of the text. */
@@ -1951,6 +2124,19 @@ static void rvn_text_editor_paint(rvn_widget_t* widget, RPainter* painter) {
 	if (focused && !has_selection && language) rvn_ed_update_match(ed);
 	else ed->match_found = R_FALSE;
 
+	/* selection backgrounds painted as unified continuous geometry */
+	if (has_selection) {
+		rvn_ed_paint_selection_range(ed, painter, &m, first_row, last_row, sel_min, sel_max,
+			m.area.x - scroll_x, scroll_y, selection);
+	}
+	for (extra = 0; extra < ed->extra_count; extra++) {
+		const rvn_ed_cursor_t* cursor = &ed->extra[extra];
+		if (rvn_ed_pos_cmp(cursor->caret, cursor->anchor) == 0) continue;
+		rvn_ed_paint_selection_range(ed, painter, &m, first_row, last_row,
+			rvn_ed_cursor_min(cursor), rvn_ed_cursor_max(cursor),
+			m.area.x - scroll_x, scroll_y, selection);
+	}
+
 	for (row = first_row; row < last_row; row++) {
 		const rvn_ed_line_t* l;
 		int line, line_row, begin, end;
@@ -1963,14 +2149,6 @@ static void rvn_text_editor_paint(rvn_widget_t* widget, RPainter* painter) {
 		if (focused && !has_selection && line == ed->caret.line && !ed->read_only) {
 			rvn_paint_rect(painter, rvn_rect(m.gutter + 1.0f, y, rect.w - m.gutter - 2.0f, m.line_height),
 				rvn_color_fade(rvn_widget_color(widget, R_COLOR_ROW_HOVERED), 0.6f));
-		}
-		/* the part of the selections that lies on this row */
-		if (has_selection) rvn_ed_paint_selection(ed, painter, &m, row, sel_min, sel_max, m.area.x - scroll_x, y, selection);
-		for (extra = 0; extra < ed->extra_count; extra++) {
-			const rvn_ed_cursor_t* cursor = &ed->extra[extra];
-			if (rvn_ed_pos_cmp(cursor->caret, cursor->anchor) == 0) continue;
-			rvn_ed_paint_selection(ed, painter, &m, row, rvn_ed_cursor_min(cursor), rvn_ed_cursor_max(cursor),
-				m.area.x - scroll_x, y, selection);
 		}
 		/* the matches of the search on this row */
 		rvn_ed_paint_matches(ed, painter, &m, line, begin, end, m.area.x - scroll_x, y);
