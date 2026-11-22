@@ -580,10 +580,6 @@ static void rvn_tab_view_paint(rvn_widget_t* widget, RPainter* painter) {
 			} else if (hot) {
 				rvn_paint_rect(painter, tab, rvn_widget_color(widget, R_COLOR_HEADER_HOVERED));
 			}
-			if (i + 1 < widget->child_count) {
-				rvn_paint_rect(painter, rvn_rect(x + width - 0.5f, 6.0f, 1.0f, bar - 12.0f),
-					rvn_widget_color(widget, R_COLOR_SEPARATOR));
-			}
 			rvn_paint_push_clip(painter, rvn_rect(x, 0.0f, rvn_maxf(0.0f, width - (closable ? 28.0f : 8.0f)), bar));
 			if (page->slot.has_icon) {
 				rvn_color_t tint = rvn_icon_tint(page->slot.icon, page->slot.icon_tint, color,
@@ -604,6 +600,18 @@ static void rvn_tab_view_paint(rvn_widget_t* widget, RPainter* painter) {
 				rvn_paint_icon(painter, RVN_ICON_CROSS, close.x + close.w * 0.5f,
 					close.y + close.h * 0.5f, 7.0f, over ? text_color : rvn_color_fade(text_color, 0.62f));
 			}
+			x += width;
+		}
+		/* Paint the tab edges after all fills, so the active tab cannot cover
+		 * either divider. The first tab gets its own left edge; every tab has a
+		 * full-height right edge, matching the border-right of the Qt reference. */
+		x = -tabs->scroll_x;
+		for (i = 0; i < widget->child_count; i++) {
+			float width = rvn_tab_width(widget, widget->children[i]);
+			if (i == 0 && (int)i == tabs->active)
+				rvn_paint_rect(painter, rvn_rect(x - 0.5f, 0.0f, 1.0f, bar), rvn_widget_color(widget, R_COLOR_SEPARATOR));
+			rvn_paint_rect(painter, rvn_rect(x + width - 0.5f, 0.0f, 1.0f, bar),
+				rvn_widget_color(widget, R_COLOR_SEPARATOR));
 			x += width;
 		}
 		rvn_paint_pop_clip(painter);
