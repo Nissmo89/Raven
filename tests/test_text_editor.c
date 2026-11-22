@@ -90,6 +90,11 @@ static void test_content(void) {
 	/* Regression: a selection across rows paints as one connected, corner-aware shape. */
 	Rtext_editor_select(g_editor, 0, 2, 2, 3);
 	Rdraw_frame();
+	/* A short middle row rounds inward on both sides of the connected block. */
+	Rtext_editor_set_text(g_editor, "0123456789\nxy\nabcdefgh");
+	Rtext_editor_select(g_editor, 0, 0, 2, 8);
+	CHECK_STR(Rtext_editor_get_selected_text(g_editor), "0123456789\nxy\nabcdefgh");
+	Rdraw_frame();
 
 	/* typing replaces the selection, and tells the application */
 	Rtext_editor_select(g_editor, 0, 3, 1, 2);
