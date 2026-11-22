@@ -7,7 +7,7 @@
  * tabs of an application (Unreal : the level, then one tab per open asset).
  * Tabs on the left with an icon and a close button (a middle click closes
  * too) ; the slot keeps the icon (has_icon...) and dock_fixed (no close
- * button). Too many tabs : they shrink.
+ * button). Their strip scrolls horizontally when it runs out of room.
  */
 
 #include "common.h"
@@ -26,6 +26,7 @@ typedef struct rvn_tab_view_t {
 	int documents;
 	int hot_close;          /* the pointer is on the close button of the hot tab */
 	int press_close;        /* the close button pressed (-1 : none) */
+	float scroll_x;         /* horizontal position of the document tab strip */
 	RTabCloseCallback close_callback;
 	void* close_user;
 	/** The page shown : kept when tabs before it come and go. */
@@ -46,7 +47,7 @@ static int rvn_tab_documents(const rvn_widget_t* widget) {
 }
 
 static float rvn_tab_bar_height(const rvn_widget_t* widget) {
-	if (rvn_tab_documents(widget)) return rvn_widget_metric(widget, R_METRIC_CONTROL_HEIGHT) + 10.0f;
+	if (rvn_tab_documents(widget)) return rvn_widget_metric(widget, R_METRIC_CONTROL_HEIGHT);
 	/* the segmented control of the glass themes keeps some air under it */
 	return rvn_widget_metric(widget, R_METRIC_CONTROL_HEIGHT) + (rvn_widget_glass(widget) ? 8.0f : 2.0f);
 }
@@ -60,24 +61,40 @@ static const char* rvn_tab_title(const rvn_widget_t* child) {
 }
 
 static float rvn_tab_natural_width(const rvn_widget_t* widget, const rvn_widget_t* child) {
-	float w = rvn_widget_text_width(widget, R_INVALID_ID, 0.0f, rvn_tab_title(child)) +
-		rvn_widget_metric(widget, R_METRIC_PADDING_X) * 2.0f + 4.0f;
-	if (!rvn_tab_documents(widget)) return w;
-	if (child->slot.has_icon) w += RVN_TAB_ICON + RVN_TAB_ICON_GAP;
-	if (rvn_tab_closable(widget, child)) w += RVN_TAB_CLOSE + 4.0f;
-	return rvn_clampf(w + 8.0f, 96.0f, 280.0f);
+	float text_width = rvn_widget_text_width(widget, R_INVALID_ID, 0.0f, rvn_tab_title(child));
+	float w;
+	if (!rvn_tab_documents(widget))
+		return text_width + rvn_widget_metric(widget, R_METRIC_PADDING_X) * 2.0f + 4.0f;
+	/* Match the compact 28px document tabs used by C-AIR: 15px left,
+	 * 30px right (including the close affordance), plus an optional icon. */
+	w = text_width + 45.0f;
+	if (child->slot.has_icon) w += 20.0f;
+	return rvn_clampf(w, 48.0f, 400.0f);
 }
 
-/* Documents : the tabs shrink when they do not fit. */
+/* The document tab strip scrolls; tabs keep their natural width. */
 static float rvn_tab_width(const rvn_widget_t* widget, const rvn_widget_t* child) {
-	float w = rvn_tab_natural_width(widget, child);
-	if (rvn_tab_documents(widget) && widget->rect.w > 0.0f) {
-		float total = 0.0f;
-		uint32_t i;
-		for (i = 0; i < widget->child_count; i++) total += rvn_tab_natural_width(widget, widget->children[i]);
-		if (total > widget->rect.w - 8.0f) w = rvn_maxf(48.0f, w * (widget->rect.w - 8.0f) / total);
+	return rvn_tab_natural_width(widget, child);
+}
+
+static void rvn_tab_view_ensure_visible(rvn_widget_t* widget) {
+	rvn_tab_view_t* tabs = (rvn_tab_view_t*)widget;
+	float total = 0.0f, left = 0.0f, right, maximum;
+	uint32_t i;
+	if (!tabs->documents || widget->rect.w <= 0.0f) return;
+	for (i = 0; i < widget->child_count; i++) {
+		float width = rvn_tab_width(widget, widget->children[i]);
+		total += width;
+		if ((int)i < tabs->active) left += width;
 	}
-	return w;
+	if (tabs->active < 0 || tabs->active >= (int)widget->child_count) left = 0.0f;
+	right = left;
+	if (tabs->active >= 0 && tabs->active < (int)widget->child_count)
+		right += rvn_tab_width(widget, widget->children[tabs->active]);
+	if (left < tabs->scroll_x) tabs->scroll_x = left;
+	else if (right > tabs->scroll_x + widget->rect.w) tabs->scroll_x = right - widget->rect.w;
+	maximum = rvn_maxf(0.0f, total - widget->rect.w);
+	tabs->scroll_x = rvn_clampf(tabs->scroll_x, 0.0f, maximum);
 }
 
 /* The close button of a tab (documents). */
@@ -109,6 +126,7 @@ static rvn_vec2_t rvn_tab_view_measure(rvn_widget_t* widget) {
 static void rvn_tab_view_arrange(rvn_widget_t* widget) {
 	rvn_widget_t* page = rvn_tab_view_page(widget);
 	float bar = rvn_tab_bar_height(widget);
+	rvn_tab_view_ensure_visible(widget);
 	if (page && !rvn_widget_collapsed(page)) {
 		rvn_rect_t room = rvn_rect(0.0f, bar, widget->rect.w, rvn_maxf(0.0f, widget->rect.h - bar));
 		rvn_widget_arrange_slot(page, room);
@@ -137,13 +155,15 @@ static void rvn_tab_view_children_changed(rvn_widget_t* widget) {
 	if (tabs->active >= (int)widget->child_count) tabs->active = (int)widget->child_count - 1;
 	if (tabs->active < 0 && widget->child_count > 0) tabs->active = 0;
 	tabs->active_page = tabs->active >= 0 && tabs->active < (int)widget->child_count ? widget->children[tabs->active] : NULL;
+	rvn_tab_view_ensure_visible(widget);
 	tabs->hot = -1;
 	tabs->press_close = -1;
 	rvn_widget_invalidate_paint(widget);
 }
 
 static int rvn_tab_at(const rvn_widget_t* widget, float x, float y, int* on_close) {
-	float position = rvn_tab_documents(widget) ? 4.0f : 0.0f;
+	const rvn_tab_view_t* tabs = (const rvn_tab_view_t*)widget;
+	float position = rvn_tab_documents(widget) ? -tabs->scroll_x : 0.0f;
 	uint32_t i;
 	if (on_close) *on_close = R_FALSE;
 	if (y < 0.0f || y >= rvn_tab_bar_height(widget)) return -1;
@@ -187,7 +207,7 @@ static void rvn_tab_request_close(rvn_widget_t* widget, int index) {
 	active = tabs->active;
 	Rwidget_destroy(content);
 	/* another page shown, or the same one at another index: told as a click on its tab would be */
-	if (rvn_widget_alive(widget) && tabs->active >= 0 && (rvn_tab_view_active_id(tabs) != shown || tabs->active != active))
+	if (rvn_widget_alive(widget) && (rvn_tab_view_active_id(tabs) != shown || tabs->active != active))
 		rvn_tab_view_notify(widget);
 }
 
@@ -204,6 +224,7 @@ static void rvn_tab_view_activate(rvn_widget_t* widget, int index, int notify) {
 	}
 	tabs->active = index;
 	tabs->active_page = widget->children[index];
+	rvn_tab_view_ensure_visible(widget);
 	rvn_widget_invalidate_layout(widget);
 	if (notify) rvn_tab_view_notify(widget);
 }
@@ -213,6 +234,20 @@ static int rvn_tab_view_event(rvn_widget_t* widget, const REvent* event) {
 	int index;
 	int on_close = R_FALSE;
 	switch (event->type) {
+		case R_EVENT_MOUSE_WHEEL:
+			if (tabs->documents && event->local_y >= 0.0f && event->local_y < rvn_tab_bar_height(widget)) {
+				float delta = event->wheel_x != 0.0f ? event->wheel_x : -event->wheel_y;
+				float total = 0.0f, maximum;
+				uint32_t i;
+				for (i = 0; i < widget->child_count; i++) total += rvn_tab_width(widget, widget->children[i]);
+				maximum = rvn_maxf(0.0f, total - widget->rect.w);
+				tabs->scroll_x = rvn_clampf(tabs->scroll_x + delta * 48.0f, 0.0f, maximum);
+				tabs->hot = -1;
+				tabs->hot_close = R_FALSE;
+				rvn_widget_invalidate_paint(widget);
+				return R_TRUE;
+			}
+			return R_FALSE;
 		case R_EVENT_MOUSE_MOVE:
 			index = rvn_tab_at(widget, event->local_x, event->local_y, &on_close);
 			if (index != tabs->hot || on_close != tabs->hot_close) {
@@ -522,6 +557,58 @@ static void rvn_tab_view_paint(rvn_widget_t* widget, RPainter* painter) {
 	stretch = rvn_minf(fabsf(tabs->mark_x.velocity) * 0.018f, mark_w * 0.35f);
 	mark_x -= stretch * 0.5f;
 	mark_w += stretch;
+	/* C-AIR's editor tabs follow the flat, compact Zed/Qt reference rather
+	 * than Raven's platform-specific pill or raised document-tab treatments. */
+	if (tabs->documents) {
+		float x = -tabs->scroll_x;
+		rvn_color_t text_color = rvn_widget_color(widget, R_COLOR_TEXT);
+		rvn_color_t inactive = rvn_widget_color(widget, R_COLOR_HEADER);
+		rvn_paint_rect(painter, rvn_rect(0.0f, 0.0f, widget->rect.w, bar), inactive);
+		rvn_paint_rect(painter, rvn_rect(0.0f, bar - 1.0f, widget->rect.w, 1.0f), rvn_widget_color(widget, R_COLOR_SEPARATOR));
+		rvn_paint_push_clip(painter, rvn_rect(0.0f, 0.0f, widget->rect.w, bar));
+		for (i = 0; i < widget->child_count; i++) {
+			rvn_widget_t* page = widget->children[i];
+			float width = rvn_tab_width(widget, page);
+			int active = (int)i == tabs->active;
+			int hot = (int)i == tabs->hot && (widget->flags & RVN_WF_HOVERED);
+			int closable = rvn_tab_closable(widget, page);
+			rvn_rect_t tab = rvn_rect(x, 0.0f, width, bar);
+			float tx = x + 15.0f;
+			rvn_color_t color = active ? text_color : rvn_widget_color(widget, R_COLOR_TEXT_DISABLED);
+			if (active) {
+				rvn_paint_rect(painter, tab, rvn_widget_color(widget, R_COLOR_TAB_ACTIVE));
+			} else if (hot) {
+				rvn_paint_rect(painter, tab, rvn_widget_color(widget, R_COLOR_HEADER_HOVERED));
+			}
+			if (i + 1 < widget->child_count) {
+				rvn_paint_rect(painter, rvn_rect(x + width - 0.5f, 6.0f, 1.0f, bar - 12.0f),
+					rvn_widget_color(widget, R_COLOR_SEPARATOR));
+			}
+			rvn_paint_push_clip(painter, rvn_rect(x, 0.0f, rvn_maxf(0.0f, width - (closable ? 28.0f : 8.0f)), bar));
+			if (page->slot.has_icon) {
+				rvn_color_t tint = rvn_icon_tint(page->slot.icon, page->slot.icon_tint, color,
+					rvn_rgba(1.0f, 1.0f, 1.0f, active ? 1.0f : 0.75f));
+				rvn_paint_image(painter, rvn_rect(tx, floorf((bar - RVN_TAB_ICON) * 0.5f), RVN_TAB_ICON, RVN_TAB_ICON),
+					page->slot.icon, page->slot.icon_uv, tint, 0.0f);
+				tx += RVN_TAB_ICON + RVN_TAB_ICON_GAP;
+			}
+			rvn_paint_text_in(painter, R_INVALID_ID, rvn_widget_font_size(widget, 0.0f),
+				rvn_rect(tx, 0.0f, rvn_maxf(0.0f, x + width - tx - (closable ? 28.0f : 8.0f)), bar),
+				0.0f, rvn_tab_title(page), -1, color);
+			rvn_paint_pop_clip(painter);
+			if (closable && (active || hot)) {
+				rvn_rect_t close = rvn_tab_close_rect(widget, x, width);
+				int over = hot && tabs->hot_close;
+				if (over || tabs->press_close == (int)i)
+					rvn_paint_box(painter, close, 3.0f, rvn_widget_color(widget, R_COLOR_CONTROL_PRESSED), 0.0f, 0);
+				rvn_paint_icon(painter, RVN_ICON_CROSS, close.x + close.w * 0.5f,
+					close.y + close.h * 0.5f, 7.0f, over ? text_color : rvn_color_fade(text_color, 0.62f));
+			}
+			x += width;
+		}
+		rvn_paint_pop_clip(painter);
+		return;
+	}
 
 	if (rvn_widget_family(widget) == RVN_FAMILY_WINDOWS) {
 		rvn_tab_view_paint_fluent(widget, painter, mark_x, mark_w);

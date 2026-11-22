@@ -8,7 +8,7 @@
 #include "common.h"
 #include "../xml/xml.h"
 
-#define RVN_CRUMB_GAP 22.0f
+#define RVN_CRUMB_GAP 14.0f
 
 typedef struct rvn_breadcrumb_t {
 	rvn_widget_t base;
@@ -142,9 +142,13 @@ static void rvn_breadcrumb_paint(rvn_widget_t* widget, RPainter* painter) {
 	rvn_breadcrumb_t* crumbs = (rvn_breadcrumb_t*)widget;
 	float font = rvn_widget_font_size(widget, 0.0f);
 	rvn_color_t text = rvn_widget_text_color(widget, painter);
-	rvn_color_t link = painter->enabled ? rvn_widget_color(widget, R_COLOR_LINK) : text;
+	rvn_color_t link = rvn_color_fade(text, painter->enabled ? 0.68f : 0.55f);
 	rvn_color_t dim = rvn_color_fade(text, 0.55f);
 	int focused = (widget->flags & RVN_WF_FOCUSED) != 0, i;
+	rvn_paint_rect(painter, rvn_rect(0.0f, 0.0f, widget->rect.w, widget->rect.h),
+		rvn_widget_color(widget, R_COLOR_TAB_ACTIVE));
+	rvn_paint_rect(painter, rvn_rect(0.0f, widget->rect.h - 1.0f, widget->rect.w, 1.0f),
+		rvn_widget_color(widget, R_COLOR_SEPARATOR));
 
 	for (i = crumbs->first > 0 ? -1 : 0; i < (int)crumbs->count; i++) {
 		int index = i < 0 ? crumbs->first - 1 : i;
@@ -152,7 +156,7 @@ static void rvn_breadcrumb_paint(rvn_widget_t* widget, RPainter* painter) {
 		int last = i == (int)crumbs->count - 1;
 		int hot = !last && (crumbs->hot == index || crumbs->pressed == index || (focused && crumbs->cursor == index)) && painter->enabled;
 		if (hot) {
-			rvn_paint_box(painter, rvn_rect(rect.x, rect.y + 3.0f, rect.w, rect.h - 6.0f), 6.0f,
+			rvn_paint_box(painter, rvn_rect(rect.x, rect.y + 3.0f, rect.w, rect.h - 6.0f), 3.0f,
 				rvn_widget_color(widget, crumbs->pressed == index ? R_COLOR_CONTROL_PRESSED : R_COLOR_ROW_HOVERED), 0.0f, 0);
 		}
 		rvn_paint_push_clip(painter, rect);
