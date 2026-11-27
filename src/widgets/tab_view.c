@@ -649,7 +649,10 @@ static void rvn_tab_view_paint(rvn_widget_t* widget, RPainter* painter) {
 				rvn_paint_box4(painter, rvn_rect(tab.x, tab.y, tab.w, 2.0f), radii, rvn_widget_color(widget, R_COLOR_ACCENT), 0.0f, 0);
 			} else if (is_hot) {
 				rvn_paint_box4(painter, tab, radii, rvn_widget_color(widget, R_COLOR_HEADER_HOVERED), 0.0f, 0);
-			} else if (i + 1 < widget->child_count && (int)i + 1 != tabs->active) {
+			}
+			/* Each shared divider belongs to the tab on its left. The trailing
+			 * tab-bar background is not a filler widget and gets no left edge. */
+			if (i + 1 < widget->child_count) {
 				rvn_paint_rect(painter, rvn_rect(tab.x + tab.w + 0.5f, tab.y + 7.0f, 1.0f, tab.h - 14.0f), rvn_widget_color(widget, R_COLOR_SEPARATOR));
 			}
 			rvn_paint_push_clip(painter, rvn_rect(tab.x, tab.y, rvn_maxf(0.0f, tab.w - (closable ? RVN_TAB_CLOSE + 8.0f : 4.0f)), tab.h));
