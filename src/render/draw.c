@@ -395,6 +395,15 @@ rvn_box_t rvn_paint_snap(const RPainter* painter, rvn_rect_t rect) {
 	box.y0 = floorf((painter->oy + rect.y) * painter->scale + 0.5f);
 	box.x1 = floorf((painter->ox + rect.x + rect.w) * painter->scale + 0.5f);
 	box.y1 = floorf((painter->oy + rect.y + rect.h) * painter->scale + 0.5f);
+	/* Keep thin rules a stable physical width when layout origins shift. */
+	if (rect.w > 0.0f && rect.w <= 2.0f) {
+		float pixels = floorf(rect.w * painter->scale + 0.5f);
+		box.x1 = box.x0 + (pixels < 1.0f ? 1.0f : pixels);
+	}
+	if (rect.h > 0.0f && rect.h <= 2.0f) {
+		float pixels = floorf(rect.h * painter->scale + 0.5f);
+		box.y1 = box.y0 + (pixels < 1.0f ? 1.0f : pixels);
+	}
 	return box;
 }
 

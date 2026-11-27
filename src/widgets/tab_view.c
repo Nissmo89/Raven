@@ -645,7 +645,14 @@ static void rvn_tab_view_paint(rvn_widget_t* widget, RPainter* painter) {
 			radii[0] = radii[1] = radius;
 			radii[2] = radii[3] = 0.0f;
 			if (is_active) {
-				rvn_paint_box4(painter, rvn_rect(tab.x, tab.y, tab.w, tab.h + 1.0f), radii, rvn_widget_color(widget, R_COLOR_TAB_ACTIVE), 0.0f, 0);
+				float active_width = tab.w;
+				if (i + 1 == widget->child_count) {
+					/* Merge the active final tab with the trailing bar background. */
+					active_width = rvn_maxf(tab.w, widget->rect.w - tab.x);
+					radii[1] = 0.0f;
+				}
+				rvn_paint_box4(painter, rvn_rect(tab.x, tab.y, active_width, tab.h + 1.0f), radii, rvn_widget_color(widget, R_COLOR_TAB_ACTIVE), 0.0f, 0);
+				radii[1] = radius;
 				rvn_paint_box4(painter, rvn_rect(tab.x, tab.y, tab.w, 2.0f), radii, rvn_widget_color(widget, R_COLOR_ACCENT), 0.0f, 0);
 			} else if (is_hot) {
 				rvn_paint_box4(painter, tab, radii, rvn_widget_color(widget, R_COLOR_HEADER_HOVERED), 0.0f, 0);
